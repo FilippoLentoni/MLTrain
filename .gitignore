@@ -1,0 +1,38 @@
+# --- Node / TypeScript / CDK ---
+node_modules/
+cdk.out/
+.cdk.staging/
+.cdk-build/
+*.tsbuildinfo
+*.js
+!jest.config.js
+*.d.ts
+
+# --- Python (only in scripts/ — runtime artefacts) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Local secrets / env ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- AWS / CDK local context (machine-specific) ---
+cdk.context.json
+
+# --- Misc local marker files ---
+.codex
