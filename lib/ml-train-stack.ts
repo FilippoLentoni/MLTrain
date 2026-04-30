@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
+import * as zlib from 'zlib';
 import * as cdk from 'aws-cdk-lib';
 import {
   Stack,
@@ -17,9 +17,48 @@ import { Construct } from 'constructs';
 
 // AWS's public ECR for SageMaker built-in images in us-east-2 (the only region we deploy to).
 // See https://docs.aws.amazon.com/sagemaker/latest/dg-ecr-paths/sagemaker-algo-docker-registry-paths.html
-const SAGEMAKER_ECR = '257758044811.dkr.ecr.us-east-2.amazonaws.com';
+const DEPLOY_REGION = 'us-east-2';
+const SAGEMAKER_ECR = `257758044811.dkr.ecr.${DEPLOY_REGION}.amazonaws.com`;
 const XGBOOST_IMAGE = `${SAGEMAKER_ECR}/sagemaker-xgboost:1.7-1`;
 const SKLEARN_IMAGE = `${SAGEMAKER_ECR}/sagemaker-scikit-learn:1.2-1-cpu-py3`;
+const DEFAULT_PROCESSING_INSTANCE_TYPE = 'ml.t3.medium';
+const DEFAULT_TRAINING_INSTANCE_TYPE = 'ml.m5.large';
+
+function writeTarOctal(header: Buffer, offset: number, length: number, value: number) {
+  header.write(value.toString(8).padStart(length - 1, '0') + '\0', offset, length, 'ascii');
+}
+
+function buildTarHeader(fileName: string, fileSize: number) {
+  const header = Buffer.alloc(512);
+  header.write(fileName, 0, 100, 'utf8');
+  writeTarOctal(header, 100, 8, 0o644);
+  writeTarOctal(header, 108, 8, 0);
+  writeTarOctal(header, 116, 8, 0);
+  writeTarOctal(header, 124, 12, fileSize);
+  writeTarOctal(header, 136, 12, 0);
+  header.fill(' ', 148, 156);
+  header.write('0', 156, 1, 'ascii');
+  header.write('ustar', 257, 6, 'ascii');
+  header.write('00', 263, 2, 'ascii');
+
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  header.write(checksum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+  return header;
+}
+
+function writeSourceDirTarball(scriptsDir: string, destination: string) {
+  const fileName = 'train.py';
+  const fileContents = fs.readFileSync(path.join(scriptsDir, fileName));
+  const paddingLength = (512 - (fileContents.length % 512)) % 512;
+  const tarContents = Buffer.concat([
+    buildTarHeader(fileName, fileContents.length),
+    fileContents,
+    Buffer.alloc(paddingLength),
+    Buffer.alloc(1024),
+  ]);
+
+  fs.writeFileSync(destination, zlib.gzipSync(tarContents));
+}
 
 export class MLTrainStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
@@ -50,9 +89,7 @@ export class MLTrainStack extends Stack {
     // Build sourcedir.tar.gz at synth time into a dedicated build dir, then upload it.
     const buildDir = path.join(__dirname, '..', '.cdk-build', 'sourcedir');
     fs.mkdirSync(buildDir, { recursive: true });
-    execSync(
-      `tar -czf ${path.join(buildDir, 'sourcedir.tar.gz')} -C ${scriptsDir} train.py`,
-    );
+    writeSourceDirTarball(scriptsDir, path.join(buildDir, 'sourcedir.tar.gz'));
 
     const sourceDirDeployment = new s3deploy.BucketDeployment(this, 'TrainSourceDirDeployment', {
       sources: [s3deploy.Source.asset(buildDir)],
@@ -82,8 +119,16 @@ export class MLTrainStack extends Stack {
       Version: '2020-12-01',
       Metadata: {},
       Parameters: [
-        { Name: 'ProcessingInstanceType', Type: 'String', DefaultValue: 'ml.m5.xlarge' },
-        { Name: 'TrainingInstanceType', Type: 'String', DefaultValue: 'ml.m5.xlarge' },
+        {
+          Name: 'ProcessingInstanceType',
+          Type: 'String',
+          DefaultValue: DEFAULT_PROCESSING_INSTANCE_TYPE,
+        },
+        {
+          Name: 'TrainingInstanceType',
+          Type: 'String',
+          DefaultValue: DEFAULT_TRAINING_INSTANCE_TYPE,
+        },
       ],
       Steps: [
         {
@@ -201,7 +246,7 @@ export class MLTrainStack extends Stack {
               // and runs `python train.py --<hp> <value> ...` instead of the built-in algorithm.
               sagemaker_program: 'train.py',
               sagemaker_submit_directory: `${bucketUri}/sourcedir/sourcedir.tar.gz`,
-              sagemaker_region: this.region,
+              sagemaker_region: DEPLOY_REGION,
               sagemaker_container_log_level: '20',
               // Forwarded as CLI args to scripts/train.py
               objective: 'binary:logistic',
@@ -304,9 +349,14 @@ export class MLTrainStack extends Stack {
     new CfnOutput(this, 'PipelineName', { value: cfnPipeline.pipelineName! });
     new CfnOutput(this, 'ExecutionRoleArn', { value: role.roleArn });
     new CfnOutput(this, 'StartCommand', {
-      value: Fn.sub('aws sagemaker start-pipeline-execution --pipeline-name ${P}', {
-        P: cfnPipeline.pipelineName!,
-      }),
+      value: Fn.sub(
+        'aws sagemaker start-pipeline-execution --pipeline-name ${P} --pipeline-parameters Name=ProcessingInstanceType,Value=${ProcessingInstanceType} Name=TrainingInstanceType,Value=${TrainingInstanceType}',
+        {
+          P: cfnPipeline.pipelineName!,
+          ProcessingInstanceType: DEFAULT_PROCESSING_INSTANCE_TYPE,
+          TrainingInstanceType: DEFAULT_TRAINING_INSTANCE_TYPE,
+        },
+      ),
     });
   }
 }
@@ -316,7 +366,7 @@ const app = new cdk.App();
 new MLTrainStack(app, 'MLTrainStack', {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
-    region: process.env.CDK_DEFAULT_REGION,
+    region: DEPLOY_REGION,
   },
 });
 app.synth();

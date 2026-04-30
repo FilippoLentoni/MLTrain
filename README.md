@@ -148,18 +148,24 @@ Stack outputs (printed after deploy):
 
 ```bash
 aws sagemaker start-pipeline-execution \
-    --pipeline-name xgboost-pipeline-MLTrainStack
+    --pipeline-name xgboost-pipeline-MLTrainStack \
+    --pipeline-parameters \
+      Name=ProcessingInstanceType,Value=ml.t3.medium \
+      Name=TrainingInstanceType,Value=ml.m5.large
 ```
 
 Or, in the AWS Console: **SageMaker Studio → Pipelines → xgboost-pipeline-MLTrainStack → Create execution**.
 
-End-to-end runtime is roughly **8–12 minutes** on `ml.m5.xlarge` instances (≈ 3 min preprocess + 3–5 min train + 2 min evaluate).
+End-to-end runtime varies by quota-approved instance type. The default stack uses `ml.t3.medium` for processing/evaluation and `ml.m5.large` for training to fit smaller/newer AWS accounts better.
 
 ### Watch progress
 
 ```bash
 EXEC_ARN=$(aws sagemaker start-pipeline-execution \
     --pipeline-name xgboost-pipeline-MLTrainStack \
+    --pipeline-parameters \
+      Name=ProcessingInstanceType,Value=ml.t3.medium \
+      Name=TrainingInstanceType,Value=ml.m5.large \
     --query PipelineExecutionArn --output text)
 
 aws sagemaker list-pipeline-execution-steps --pipeline-execution-arn "$EXEC_ARN"
@@ -217,15 +223,19 @@ s3://<BucketName>/
 | **Training algorithm itself** (`xgb.train` call, custom losses, callbacks) | [scripts/train.py](scripts/train.py) |
 | Synthetic data generation / preprocessing logic | [scripts/preprocess.py](scripts/preprocess.py) |
 | Evaluation metric / model loading logic        | [scripts/postprocess.py](scripts/postprocess.py) |
-| Supported regions                | `SAGEMAKER_IMAGE_ACCOUNTS` map in [lib/ml-train-stack.ts](lib/ml-train-stack.ts) — extend with the [official region/account list](https://docs.aws.amazon.com/sagemaker/latest/dg-ecr-paths/sagemaker-algo-docker-registry-paths.html) |
+| Supported region                 | `SAGEMAKER_ECR` in [lib/ml-train-stack.ts](lib/ml-train-stack.ts) is currently pinned to `us-east-2`; change it if deploying elsewhere |
 
-Pipeline parameters `ProcessingInstanceType` / `TrainingInstanceType` default to `ml.m5.xlarge`. Override per-execution:
+Pipeline parameters `ProcessingInstanceType` / `TrainingInstanceType` default to `ml.t3.medium` and `ml.m5.large`. Override per execution if your account has quota for a different size:
 
 ```bash
 aws sagemaker start-pipeline-execution \
     --pipeline-name xgboost-pipeline-MLTrainStack \
-    --pipeline-parameters Name=TrainingInstanceType,Value=ml.m5.2xlarge
+    --pipeline-parameters \
+      Name=ProcessingInstanceType,Value=ml.m5.large \
+      Name=TrainingInstanceType,Value=ml.m5.2xlarge
 ```
+
+If SageMaker reports a `SAGEMAKER_RESOURCE_LIMIT` error, start a new pipeline execution with an instance type that has quota in that account/region, or request a quota increase in AWS Service Quotas. Failed pipeline executions cannot be resumed in place.
 
 ---
 
